@@ -1429,21 +1429,6 @@ pub lam torch_matmul_matrices (A: Arithmetic) {rb m k n: Nat}
 /// NCHW `aten.convolution` specialization decomposed through grouped
 /// cross-correlation. Transposed convolution and nonzero output padding remain
 /// explicit preconditions instead of silently changing the semantics.
-pub lam torch_grouped_conv2d_in_map
-    (cin_per_group cout_per_group: Nat,
-     stride dilation: «2; Nat»)
-    (o: «7; affine.Index»): «4; affine.Index» =
-    let group = affine.semiop.floordiv (o#1_7, cout_per_group);
-    let channel = affine.op.add
-        (affine.semiop.mul (group, cin_per_group), o#4_7);
-    (o#0_7, channel,
-     affine.op.add
-        (affine.semiop.mul (o#2_7, stride#0_2),
-         affine.semiop.mul (o#5_7, dilation#0_2)),
-     affine.op.add
-        (affine.semiop.mul (o#3_7, stride#1_2),
-         affine.semiop.mul (o#6_7, dilation#1_2)));
-
 pub lam torch_grouped_conv2d
     (A: Arithmetic)
     {n cin cout cin_per_group h w kh kw: Nat}
@@ -1452,29 +1437,15 @@ pub lam torch_grouped_conv2d
      weight: (tensor.Tensor 4 (cout, cin_per_group, kh, kw) A#R#T))
   : (tensor.Tensor 4 (tensor.conv_shape
         (n, cout, (h, w), (kh, kw), stride, dilation, padding)) A#R#T) =
-    let input_shape = (n, cin, h, w);
-    let pad_lohi = (0, 0, padding#0_2, padding#1_2);
-    let padded = tensor.pad input_shape
-        (0, pad_lohi, pad_lohi) (input, A#R#_0);
-    let padded_shape = tensor.shape padded;
-    let output_shape = tensor.conv_shape
-        (n, cout, (h, w), (kh, kw), stride, dilation, padding);
-    let cout_per_group = cout / groups;
     // An ungrouped convolution is `tensor.conv`, whose implementation schedules it.
     lam ungrouped(): (tensor.Tensor 4 (tensor.conv_shape (n, cout, (h, w), (kh, kw), stride, dilation, padding)) A#R#T) =
         tensor.conv A#R @(n, cin, cout, h, w, kh, kw) (stride, dilation, padding)
             (input, core.bitcast (tensor.Tensor 4 (cout, cin, kh, kw) A#R#T) weight);
+    // A grouped one is `tensor.conv_grouped`, which schedules it per group.
     lam grouped(): (tensor.Tensor 4 (tensor.conv_shape (n, cout, (h, w), (kh, kw), stride, dilation, padding)) A#R#T) =
-        tensor.map_reduce
-            (output_shape,
-             (n, cout, output_shape#2_4, output_shape#3_4,
-              cin_per_group, kh, kw))
-            (torch_conv_fun A#R, A#R#_0)
-            (tensor.proj_map (0, 1, 2, 3))
-            (torch_grouped_conv2d_in_map
-                (cin_per_group, cout_per_group, stride, dilation),
-             tensor.proj_map (1, 4, 5, 6))
-            (padded, weight);
+        tensor.conv_grouped A#R @(n, cin, cout, h, w, cin_per_group, kh, kw)
+            (groups, stride, dilation, padding)
+            (input, weight);
     (grouped, ungrouped)#(groups == 1) ();
 
 /// Output shape for the rank-3 NCL specialization of PyTorch convolution.
