@@ -1659,14 +1659,25 @@ anx lam avg_pool2d
                 (F#A#R#add, F#A#R#_0)
                 @(n, c, s_padded#2_4, s_padded#3_4)
                 (kernel, stride, (1, 1), (0, 0), s_out) padded;
-            let divisors = tensor.generate @(F#A#R#T, 4)
-                (n, c, s_out#ff, s_out#tt)
+            let s_avg = (n, c, s_out#ff, s_out#tt);
+            // Every window has the same divisor unless it overhangs (ceil mode) or excludes padding.
+            let uniform = core.bit2.or 0 (
+                option.is_some divisor_override,
+                core.bit2.and 0 (
+                    core.bit2.and 0 (extra_hi#ff == 0, extra_hi#tt == 0),
+                    core.bit2.or 0 (
+                        count_include_pad,
+                        core.bit2.and 0 (padding#ff == 0, padding#tt == 0))));
+            let window = option.unwrap_or divisor_override (kernel#ff * kernel#tt);
+            let by_window = tensor.unary @(F#A#R#T, F#A#R#T)
+                (torch_div_scalar F#A (F#from_nat window)) @(4, s_avg) summed;
+            let divisors = tensor.generate @(F#A#R#T, 4) s_avg
                 (torch_avg_pool_divisor F
                     (h, w, kernel, stride, padding, count_include_pad,
                      divisor_override));
-            tensor.binary @(F#A#R#T, F#A#R#T, F#A#R#T)
-                F#A#div @(4, (n, c, s_out#ff, s_out#tt))
-                (summed, divisors);
+            let by_position = tensor.binary @(F#A#R#T, F#A#R#T, F#A#R#T)
+                F#A#div @(4, s_avg) (summed, divisors);
+            (by_position, by_window)#uniform;
     end;
 
 anx lam avg_pool3d
@@ -1709,14 +1720,24 @@ anx lam avg_pool3d
                 (F#A#R#add, F#A#R#_0)
                 @(n, c, s_padded#2_5, s_padded#3_5, s_padded#4_5)
                 (kernel, stride, (1, 1, 1), (0, 0, 0), s_out) padded;
-            let divisors = tensor.generate @(F#A#R#T, 5)
-                (n, c, s_out#0_3, s_out#1_3, s_out#2_3)
+            let s_avg = (n, c, s_out#0_3, s_out#1_3, s_out#2_3);
+            let uniform = core.bit2.or 0 (
+                option.is_some divisor_override,
+                core.bit2.and 0 (
+                    core.bit2.and 0 (extra_hi#0_3 == 0, core.bit2.and 0 (extra_hi#1_3 == 0, extra_hi#2_3 == 0)),
+                    core.bit2.or 0 (
+                        count_include_pad,
+                        core.bit2.and 0 (padding#0_3 == 0, core.bit2.and 0 (padding#1_3 == 0, padding#2_3 == 0)))));
+            let window = option.unwrap_or divisor_override (kernel#0_3 * (kernel#1_3 * kernel#2_3));
+            let by_window = tensor.unary @(F#A#R#T, F#A#R#T)
+                (torch_div_scalar F#A (F#from_nat window)) @(5, s_avg) summed;
+            let divisors = tensor.generate @(F#A#R#T, 5) s_avg
                 (torch_avg_pool3d_divisor F
                     (d, h, w, kernel, stride, padding, count_include_pad,
                      divisor_override));
-            tensor.binary @(F#A#R#T, F#A#R#T, F#A#R#T)
-                F#A#div @(5, (n, c, s_out#0_3, s_out#1_3, s_out#2_3))
-                (summed, divisors);
+            let by_position = tensor.binary @(F#A#R#T, F#A#R#T, F#A#R#T)
+                F#A#div @(5, s_avg) (summed, divisors);
+            (by_position, by_window)#uniform;
     end;
 
 anx lam avg_pool1d
@@ -2194,11 +2215,13 @@ anx lam linear (A: Arithmetic) {rb k n: Nat}
     // x · Wᵀ is `tensor.dot_product`, whose implementation schedules it.
     let product = core.bitcast (tensor.Tensor (rb + 1) output_shape A#R#T)
         (tensor.dot_product A#R ((core.idx 0 ro rb,), (1_2,), (), ()) (input, weight));
-    let effective_bias = option.unwrap_or bias (tensor.splat @(A#R#T, 1) (n, A#R#_0));
-    let broadcast_bias = tensor.broadcast_in_dim @(A#R#T, 1, ro)
-        ((n,), output_shape, effective_bias, (core.idx 0 ro  rb,));
-    tensor.binary @(A#R#T, A#R#T, A#R#T)
-        A#R#add @(ro, output_shape) (product, broadcast_bias);
+    match bias with
+        | Some bias =>
+            let broadcast_bias = tensor.broadcast_in_dim @(A#R#T, 1, ro)
+                ((n,), output_shape, bias, (core.idx 0 ro  rb,));
+            tensor.binary @(A#R#T, A#R#T, A#R#T)
+                A#R#add @(ro, output_shape) (product, broadcast_bias)
+        | None => product;
 
 anx lam triu {T: *, r: Nat, s: «r; Nat»}
                         (zero: T, diagonal: I64) (input: (tensor.Tensor r s T)): (tensor.Tensor r s T) =
@@ -2371,12 +2394,14 @@ anx lam general
                 @(n, cin, cout, cin_per_group, h, w, kh, kw)
                 (groups, stride, dilation, padding)
                 (input, weight);
-            let effective_bias = option.unwrap_or bias (tensor.splat @(A#R#T, 1) (cout, A#R#_0));
-            let broadcast_bias = tensor.broadcast_in_dim
-                @(A#R#T, 1, 4)
-                ((cout,), output_shape, effective_bias, (1_4,));
-            tensor.binary @(A#R#T, A#R#T, A#R#T)
-                A#R#add @(4, output_shape) (convolved, broadcast_bias);
+            match bias with
+                | Some bias =>
+                    let broadcast_bias = tensor.broadcast_in_dim
+                        @(A#R#T, 1, 4)
+                        ((cout,), output_shape, bias, (1_4,));
+                    tensor.binary @(A#R#T, A#R#T, A#R#T)
+                        A#R#add @(4, output_shape) (convolved, broadcast_bias)
+                | None => convolved;
     end;
 
 anx lam conv1d
@@ -2444,12 +2469,14 @@ anx lam conv3d
                 @(n, cin, cout, cin_per_group, d, h, w, kd, kh, kw)
                 (groups, stride, dilation, padding)
                 (input, weight);
-            let effective_bias = option.unwrap_or bias (tensor.splat @(A#R#T, 1) (cout, A#R#_0));
-            let broadcast_bias = tensor.broadcast_in_dim
-                @(A#R#T, 1, 5)
-                ((cout,), output_shape, effective_bias, (1_5,));
-            tensor.binary @(A#R#T, A#R#T, A#R#T)
-                A#R#add @(5, output_shape) (convolved, broadcast_bias);
+            match bias with
+                | Some bias =>
+                    let broadcast_bias = tensor.broadcast_in_dim
+                        @(A#R#T, 1, 5)
+                        ((cout,), output_shape, bias, (1_5,));
+                    tensor.binary @(A#R#T, A#R#T, A#R#T)
+                        A#R#add @(5, output_shape) (convolved, broadcast_bias)
+                | None => convolved;
     end;
 
 anx lam transpose2d
@@ -2503,12 +2530,14 @@ anx lam transpose2d
                 @(n, cin, cout, cout_per_group, h, w, kh, kw)
                 (groups, stride, dilation, padding, output_padding)
                 (input, weight);
-            let effective_bias = option.unwrap_or bias (tensor.splat @(A#R#T, 1) (cout, A#R#_0));
-            let broadcast_bias = tensor.broadcast_in_dim
-                @(A#R#T, 1, 4)
-                ((cout,), output_shape, effective_bias, (1_4,));
-            tensor.binary @(A#R#T, A#R#T, A#R#T)
-                A#R#add @(4, output_shape) (convolved, broadcast_bias);
+            match bias with
+                | Some bias =>
+                    let broadcast_bias = tensor.broadcast_in_dim
+                        @(A#R#T, 1, 4)
+                        ((cout,), output_shape, bias, (1_4,));
+                    tensor.binary @(A#R#T, A#R#T, A#R#T)
+                        A#R#add @(4, output_shape) (convolved, broadcast_bias)
+                | None => convolved;
     end;
 
 anx lam transpose1d
@@ -2584,12 +2613,14 @@ anx lam transpose3d
                 @(n, cin, cout, cout_per_group, d, h, w, kd, kh, kw)
                 (groups, stride, dilation, padding, output_padding)
                 (input, weight);
-            let effective_bias = option.unwrap_or bias (tensor.splat @(A#R#T, 1) (cout, A#R#_0));
-            let broadcast_bias = tensor.broadcast_in_dim
-                @(A#R#T, 1, 5)
-                ((cout,), output_shape, effective_bias, (1_5,));
-            tensor.binary @(A#R#T, A#R#T, A#R#T)
-                A#R#add @(5, output_shape) (convolved, broadcast_bias);
+            match bias with
+                | Some bias =>
+                    let broadcast_bias = tensor.broadcast_in_dim
+                        @(A#R#T, 1, 5)
+                        ((cout,), output_shape, bias, (1_5,));
+                    tensor.binary @(A#R#T, A#R#T, A#R#T)
+                        A#R#add @(5, output_shape) (convolved, broadcast_bias)
+                | None => convolved;
     end;
 
 end
