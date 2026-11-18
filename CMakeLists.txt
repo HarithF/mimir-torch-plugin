@@ -12,17 +12,15 @@ add_mim_plugin(torch
         src/phase/lower.cpp
 )
 
-# `src/phase/lower.cpp` reads the runtime plugin's annexes. add_mim_plugin keeps each plugin's
-# `include/` private, so reach the sibling checkout under `extra/` directly; an installed MimIR
-# already provides the header through its include directory.
+# lower.cpp reads the runtime plugin's annexes; add_mim_plugin keeps `include/` private, so use the
+# sibling checkout under `extra/` (an installed MimIR provides the header itself).
 cmake_path(SET TORCH_RUNTIME_INCLUDE NORMALIZE "${CMAKE_CURRENT_LIST_DIR}/../runtime/include")
 if(EXISTS "${TORCH_RUNTIME_INCLUDE}")
     target_include_directories(mim_torch PRIVATE "${TORCH_RUNTIME_INCLUDE}")
 endif()
 
-# `torch.mim` splices `helper.mim` with a path import, which is resolved relative to the importing
-# file. The staged and installed `torch.mim` therefore needs `helper.mim` next to it; add_mim_plugin
-# only stages the plugin's own `.mim`.
+# torch.mim imports helper.mim relative to itself, so stage and install it alongside
+# (add_mim_plugin only stages the plugin's own .mim).
 if(NOT DEFINED MIM_PLUGIN_DIR)
     set(MIM_PLUGIN_DIR "${CMAKE_BINARY_DIR}/${CMAKE_INSTALL_LIBDIR}/mim")
 endif()

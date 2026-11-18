@@ -189,7 +189,6 @@ Lower::Lower(World& world, flags_t annex, bool selective)
     }
 
     observe<runtime::static_check>("constraints.dynamic_residual");
-#define MIM_BIND_TORCH_IMPL(src) bind_if_enabled<torch::src, torch::src##_impl>(#src)
 #define MIM_BIND_TORCH_SUB(family, src, legacy)                                      \
     bind_sub_if_enabled<torch::family::src, torch::family##_impl::src>(              \
         #family "." #src, #legacy)
@@ -387,7 +386,6 @@ Lower::Lower(World& world, flags_t annex, bool selective)
 
     // Metadata-only framework assertions.
     MIM_BIND_TORCH_SUB(metadata, assert_tensor_metadata, assert_tensor_metadata_op);
-#undef MIM_BIND_TORCH_IMPL
 #undef MIM_BIND_TORCH_SUB
 
     if (!preserved_.empty())

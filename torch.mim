@@ -1,23 +1,9 @@
 /// # The Torch Plugin {#torch}
 ///
-/// Framework-level Torch operators with executable Mim implementations.
-/// Each public `*_op` axiom has a matching `*_op_impl` lambda. Running
-/// `lower_torch` exposes those semantics as tensor operations.
-///
-/// Scalar behavior is supplied explicitly through `Arithmetic`. This is
-/// a lightweight typeclass dictionary that keeps dtype-specific behavior out
-/// of operator definitions. `resolve_arithmetic` and
-/// `resolve_floating` map flat scalar types to built-in dictionaries;
-/// exact static lookup and the provider branch disappear under PE.
-///
-/// Scalar dictionaries, shape arithmetic and element helpers live in
-/// `helper.mim`, spliced below with `pub import "helper.mim" as *`, so they
-/// stay reachable as `torch.*` for tests and other plugins. Only the helpers
-/// that call an `*_impl` remain in this file. Utility comments cite the
-/// matching PyTorch implementation when one exists: `PyTorch source` means
-/// that the predicate or formula intentionally mirrors that implementation,
-/// `MimIR lowering` marks helpers that only construct tensor loop/projection
-/// metadata after the PyTorch-level choice is known.
+/// Torch operators as `*_op` axioms with `*_op_impl` lambdas, exposed as tensor ops by `lower_torch`.
+/// Scalar behaviour comes from `Arithmetic`/`Floating` dictionaries (`resolve_*`), resolved under PE.
+/// Helpers live in `helper.mim` (spliced via `pub import ... as *`, reachable as `torch.*`).
+/// `PyTorch` cites the mirrored implementation; `MimIR lowering` marks pure loop/projection metadata.
 ///
 plugin tensor;
 plugin compile;
@@ -30,8 +16,7 @@ plugin option;
 
 pub import "helper.mim" as *;
 
-/// Exact lookup in a flat `(scalar type, instance)` table. This deliberately
-/// small Torch-local dispatcher is sufficient for non-compositional dtypes.
+/// Exact lookup in a flat `(scalar type, instance)` table, sufficient for flat dtypes.
 axm resolve: {V: *, n: Nat}
                   → [key: *, instances: «n; [*, V]»]
                   → V, normalize_resolve;
@@ -48,8 +33,7 @@ anx let reduction_output_tags = (
     (math.F64, 2),
 );
 
-/// Resolve both input and result dtype. Exact pair lookup is sufficient for
-/// PyTorch's flat scalar dtype lattice and is completely removed by PE.
+/// Resolve input and result dtype by exact pair lookup; removed by PE.
 anx lam resolve_reduction (Input: *) (Output: *): Reduction =
     let input_tag = resolve @(Nat, 4)
         (Input, reduction_input_tags);
@@ -71,7 +55,7 @@ anx let scalar_type_tags = (
     (math.F64, 1),
 );
 
-/// Resolves exact scalar arithmetic semantics for a supported flat dtype.
+/// Scalar arithmetic dictionary for a flat dtype.
 anx lam resolve_arithmetic (T: *): Arithmetic =
     let tag = resolve @(Nat, 2) (T, scalar_type_tags);
     torch_select_arithmetic (
@@ -79,7 +63,7 @@ anx lam resolve_arithmetic (T: *): Arithmetic =
         torch_f32_arithmetic (),
         torch_f64_arithmetic ());
 
-/// Resolves exact floating-point semantics for a supported flat dtype.
+/// Floating-point dictionary for a flat dtype.
 anx lam resolve_floating (T: *): Floating =
     let tag = resolve @(Nat, 2) (T, scalar_type_tags);
     torch_select_floating (
@@ -158,8 +142,7 @@ axm pow_tensor_scalar: [F: Floating]
                                 → {r: Nat, s: «r; Nat»}
                                 → [input: (tensor.Tensor r s F#A#R#T), exponent: F#A#R#T]
                                 → (tensor.Tensor r s F#A#R#T);
-/// PyTorch source: `torch/_refs/__init__.py::addcmul`.
-/// Python: `return self + value * tensor1 * tensor2` after broadcasting.
+/// PyTorch `_refs::addcmul`: `self + value * tensor1 * tensor2` after broadcasting.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.addcmul.html
 axm addcmul: [A: Arithmetic]
                       → {rs r1 r2 ro: Nat}
@@ -170,8 +153,7 @@ axm addcmul: [A: Arithmetic]
                       → [self: (tensor.Tensor rs ss A#R#T), tensor1: (tensor.Tensor r1 s1 A#R#T),
                          tensor2: (tensor.Tensor r2 s2 A#R#T), value: A#R#T]
                       → (tensor.Tensor ro so A#R#T);
-/// PyTorch source: `torch/_refs/__init__.py::addcdiv`.
-/// Python: `return self + value * tensor1 / tensor2` after broadcasting.
+/// PyTorch `_refs::addcdiv`: `self + value * tensor1 / tensor2` after broadcasting.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.addcdiv.html
 axm addcdiv: [A: Arithmetic]
                       → {rs r1 r2 ro: Nat}
@@ -585,9 +567,8 @@ axm threshold: [A: Arithmetic]
                         → {r: Nat, s: «r; Nat»}
                         → [input: (tensor.Tensor r s A#R#T), threshold: A#R#T, value: A#R#T]
                         → (tensor.Tensor r s A#R#T);
-/// Scalar-bound `aten.clamp`. Each Optional specializes independently. PyTorch
-/// propagates an input NaN, while a NaN bound replaces an ordered input; the
-/// compare/select implementation preserves both cases.
+/// Scalar-bound `aten.clamp`; each Optional specializes independently.
+/// Input NaN propagates and a NaN bound replaces the input, as in PyTorch.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.clamp.html
 /// Types: an `Arithmetic` tensor and optional same-dtype scalar bounds to the same tensor type.
 axm clamp: [A: Arithmetic]
@@ -746,9 +727,8 @@ axm cat: {T: *, ni r: Nat}
                   → «i: ni; (tensor.Tensor r shapes#i T)»
                   → (tensor.Tensor r (torch_concat_shape (dimension, shapes)) T);
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.stack.html
-/// Types: equal-shaped rank-`r_in` tensors gain one singleton axis and are
-/// concatenated along it. The frontend supplies the statically inferred
-/// singleton shape and canonicalized dimension; the result shape is derived.
+/// Types: equal-shaped tensors gain a singleton axis and are concatenated along it.
+/// The frontend supplies the singleton shape and canonical dimension.
 axm stack: {T: *, ni r_in r_out: Nat}
                     → [s_in: «r_in; Nat»,
                        s_singleton: «r_out; Nat»,
@@ -771,8 +751,7 @@ axm squeeze: {T: *, r_in r_out: Nat}
 axm unsqueeze: {T: *, r_in r_out: Nat}
                         → [s_in: «r_in; Nat», s_out: «r_out; Nat»]
                         → (tensor.Tensor r_in s_in T) → (tensor.Tensor r_out s_out T);
-/// PyTorch repeat with an already rank-aligned repeat vector. Each static
-/// repeat count specializes the modulo-based tensor.repeat access map.
+/// PyTorch repeat with a rank-aligned repeat vector (modulo `tensor.repeat` access map).
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.Tensor.repeat.html
 /// Types: rank-aligned repeat counts map `Tensor[T, s]` to `Tensor[T, s * repeats]`.
 axm repeat: {T: *, r: Nat, s: «r; Nat»}
@@ -857,9 +836,7 @@ anx lam repeat {T: *, r: Nat, s: «r; Nat»}
 end
 
 pub mod indexing
-/// Strided slice with the already-canonical per-axis start/step/output shape.
-/// Frontends retain PyTorch's argument normalization; all indexing semantics
-/// after that normalization are represented by this operator.
+/// Strided slice with canonical per-axis start/step/output shape (frontend normalizes args).
 /// PyTorch API: https://pytorch.org/docs/stable/tensor_view.html
 /// Types: rank-`r` tensor plus per-axis start/step/output extents to `Tensor[T, s_out]`.
 axm slice: {T: *, r: Nat}
@@ -873,14 +850,12 @@ axm select: {T: *, r: Nat, s: «r; Nat»}
                      → (tensor.Tensor r s T)
                      → (tensor.Tensor (r - 1) (torch_reduce_shape (s, torch_canonical_dim @r dimension)) T);
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.roll.html
-/// Static shifts and dimensions become per-axis modular index expressions;
-/// dimensions not present in the list retain their original coordinate.
+/// Static shifts become per-axis modular indices; unlisted dims keep their coordinate.
 axm roll: {T: *, r nr: Nat, s: «r; Nat»}
                    → [shifts: «nr; Nat», dimensions: «nr; I64»]
                    → (tensor.Tensor r s T) → (tensor.Tensor r s T);
 
-/// Value-semantics form of PyTorch's sliding-window view. MimIR tensors do not
-/// expose strides, so the view is represented by its equivalent indexed value.
+/// Value form of PyTorch's sliding-window view (MimIR tensors have no strides).
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.Tensor.unfold.html
 /// Types: rank `r` input to rank `r + 1`; `size <= shape[dimension]`, `step > 0`.
 axm unfold: {T: *, r: Nat, s: «r; Nat»}
@@ -889,7 +864,7 @@ axm unfold: {T: *, r: Nat, s: «r; Nat»}
                      → (tensor.Tensor (r + 1) (torch_unfold_shape
                             (s, torch_canonical_dim @r dimension, size, step)) T);
 
-/// narrow canonicalizes a negative start and lowers to a unit-stride slice.
+/// Canonicalizes a negative start; lowers to a unit-stride slice.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.narrow.html
 /// Types: rank-`r` tensor plus signed axis/start and Nat length to a narrowed rank-`r` tensor.
 axm narrow: {T: *, r: Nat, s: «r; Nat»}
@@ -903,28 +878,24 @@ axm gather: {T: *, r: Nat, s_input s_index: «r; Nat»}
                      → [dimension: I64]
                      → [input: (tensor.Tensor r s_input T), index: (tensor.Tensor r s_index I64)]
                      → (tensor.Tensor r s_index T);
-/// PyTorch source: `aten/src/ATen/native/ScatterGatherChecks.h` and
-/// `torch/_meta_registrations.py::scatter_shape_check`.
+/// PyTorch `ScatterGatherChecks.h` and `_meta_registrations.py::scatter_shape_check`.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.Tensor.scatter_.html
-/// Types: same-rank input/index/src tensors with equal input/src dtype; output
-/// preserves input shape. Index/source extent constraints remain executable.
+/// Types: same-rank input/index/src, equal input/src dtype, input-shaped output.
+/// Index/source extent constraints are runtime checks.
 axm scatter_src:
     {T: *, r: Nat, s_input s_index s_src: «r; Nat»}
     → [dimension: I64]
     → [input: (tensor.Tensor r s_input T), index: (tensor.Tensor r s_index I64), src: (tensor.Tensor r s_src T)]
     → (tensor.Tensor r s_input T);
-/// PyTorch scalar-value scatter overload. Python equivalent:
-/// `return input.scatter(dim, index, torch.full(index.shape, value))`.
+/// Python: `input.scatter(dim, index, torch.full(index.shape, value))`.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.Tensor.scatter_.html
 /// Types: scalar `T` is expanded to index shape before sharing src semantics.
 axm scatter_value: {T: *, r: Nat, s_input s_index: «r; Nat»}
                             → [dimension: I64, value: T]
                             → [input: (tensor.Tensor r s_input T), index: (tensor.Tensor r s_index I64)]
                             → (tensor.Tensor r s_input T);
-/// Inference value semantics of `aten.embedding`, decomposed through checked
-/// index conversion, broadcasting, and `tensor.gather`. `padding_idx`,
-/// `scale_grad_by_freq`, and `sparse` only affect autograd, but remain explicit
-/// so the axiom directly matches the public PyTorch operator.
+/// Inference `aten.embedding` via checked index cast, broadcast and `tensor.gather`.
+/// `padding_idx`, `scale_grad_by_freq`, `sparse` only affect autograd; kept to match the schema.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.nn.functional.embedding.html
 /// Types: weight `[vocab, hidden]` and I64 indices shape `s` to `s + [hidden]`.
 axm embedding: {T: *, vocab hidden ri: Nat}
@@ -935,12 +906,8 @@ axm embedding: {T: *, vocab hidden ri: Nat}
                         → [weight: (tensor.Tensor 2 (vocab, hidden) T),
                            indices: (tensor.Tensor ri s_indices I64)]
                         → (tensor.Tensor (ri + 1) (vec.cat (s_indices, (hidden,))) T);
-/// Python equivalent of `input[row_indices, column_indices]` for a rank-2
-/// tensor after PyTorch has broadcast both advanced-index tensors. The
-/// implementation converts `(row, column)` to a row-major linear index, then
-/// uses reshape, broadcast, and gather so every producer remains an explicit
-/// tensor operand. Dynamic bounds checks are sequenced by
-/// `torch_checked_index_cast`.
+/// Python: `input[rows, cols]` on rank 2 with pre-broadcast indices, via a row-major linear gather.
+/// Bounds checks are sequenced by `torch_checked_index_cast`.
 /// PyTorch API: https://pytorch.org/docs/stable/tensor_view.html#indexing-slicing-joining-mutating-ops
 /// Types: `[m, n]` input and same-shape I64 row/column indices to that shape.
 axm index_2d: {T: *, m n r: Nat, s: «r; Nat»}
@@ -956,8 +923,7 @@ end
 
 pub mod creation
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.nn.functional.pad.html
-/// Constant, nonnegative padding specialization. Static pad widths expose the
-/// complete output shape and index mapping to partial evaluation.
+/// Constant, nonnegative padding; static widths expose shape and index map to PE.
 axm constant_pad:
     {T: *, r np: Nat, s: «r; Nat»}
     → [padding: «2 * np; Nat», value: T]
@@ -973,39 +939,33 @@ axm full: {T: *, r: Nat}
                    → [dims: «r; Nat», value: T]
                    → (tensor.Tensor r dims T);
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.scalar_tensor.html
-/// Constructs a nominal rank-zero tensor without changing the scalar dtype.
+/// Nominal rank-zero tensor of the same dtype.
 axm scalar_tensor: [T: *] → T → tensor.Tensor 0 () T;
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.full_like.html
 /// Types: input shape from `Tensor[Tin, s]` and scalar `T` to `Tensor[T, s]`.
 axm full_like: {Tin T: *, r: Nat, s: «r; Nat»}
                         → [input: (tensor.Tensor r s Tin), value: T]
                         → (tensor.Tensor r s T);
-/// Value semantics for contiguous `aten.empty_strided`. Layout is not part of
-/// the tensor type, so `stride` is retained at the Torch boundary while each
-/// element is intentionally undefined until initialized by a later operator.
+/// Contiguous `aten.empty_strided`; `stride` is kept for the schema only, elements are undefined.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.empty_strided.html
 /// Types: shape/stride vectors and element type `T` to an undefined `Tensor[T, shape]`.
 axm empty_strided: {T: *, r: Nat}
                             → [dims: «r; Nat», stride: «r; Nat»]
                             → (tensor.Tensor r dims T);
-/// Functional value semantics of `aten.fill.Scalar`: the input determines
-/// dtype and shape, while every output element is replaced by `value`.
+/// Functional `aten.fill.Scalar`: input shape and dtype, every element `value`.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.Tensor.fill_.html
 /// Types: `Tensor[T, s]` and scalar `T` to a functional same-type tensor value.
 axm fill_scalar: {T: *, r: Nat, s: «r; Nat»}
                           → [input: (tensor.Tensor r s T), value: T]
                           → (tensor.Tensor r s T);
-/// Integer `aten.arange`. `size` is a dependent shape argument resolved from
-/// `(start, end, step)` by the caller; retaining all scalar operands keeps the
-/// public operator contract visible while the element implementation only
-/// needs `start` and `step`.
+/// Integer `aten.arange`; the caller resolves `size` from `(start, end, step)`.
+/// `end` is kept for the schema; elements only need `start` and `step`.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.arange.html
 /// Types: I64 start/stop/step plus dependent `size` to a one-dimensional I64 tensor.
 axm arange_i64: {size: Nat}
                          → [start: I64, stop: I64, step: I64]
                          → (tensor.Tensor 1 size I64);
-/// Clone has identity value semantics, but retains an explicit tensor
-/// producer so buffer lowering materializes independent output storage.
+/// Identity value, but an explicit producer so bufferization allocates fresh storage.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.clone.html
 /// Types: identity on `Tensor[T, s]` under immutable value semantics.
 axm clone: {T: *, r: Nat, s: «r; Nat»} → (tensor.Tensor r s T) → (tensor.Tensor r s T);
@@ -1146,8 +1106,7 @@ axm sum_dims_keepdim: [A: Arithmetic]
                                → (tensor.Tensor r s A#R#T)
                                → (tensor.Tensor r (torch_multi_keepdim_shape
                                     (s, torch_canonical_dims @(r, nr) dimensions)) A#R#T);
-/// PyTorch `sum.dim_IntList` with one schema-shaped `keepdim` parameter.
-/// The frontend canonicalizes `dim=None` to the complete static axis list.
+/// PyTorch `sum.dim_IntList`; the frontend expands `dim=None` to all axes.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.sum.html
 axm sum: [A: Arithmetic]
     → {r nr: Nat, s: «r; Nat»}
@@ -1155,9 +1114,7 @@ axm sum: [A: Arithmetic]
     → (tensor.Tensor r s A#R#T)
     → ReductionTensor @(A#R#T, r, nr)
         (s, torch_canonical_dims @(r, nr) dimensions, keepdim);
-/// Mixed-dtype `sum.dim_IntList`. The dictionary captures input conversion,
-/// accumulation and result dtype; static dtype resolution and identity casts
-/// are exposed to PE before tensor lowering.
+/// Mixed-dtype `sum.dim_IntList`; the dictionary fixes conversion, accumulation and result dtype.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.sum.html
 axm sum_typed: [D: Reduction]
     → {r nr: Nat, s: «r; Nat»}
@@ -1181,9 +1138,7 @@ axm norm2_dims_keepdim: [F: Floating]
     → (tensor.Tensor r s F#A#R#T)
     → (tensor.Tensor r (torch_multi_keepdim_shape
          (s, torch_canonical_dims @(r, nr) dimensions)) F#A#R#T);
-/// PyTorch vector norm over arbitrary finite p, zero, and positive/negative
-/// infinity. The dtype is supplied by `F`; dtype conversion remains a frontend
-/// overload concern until promotion dictionaries are added.
+/// PyTorch vector norm for finite p, 0 and ±inf; dtype conversion is left to the frontend.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.linalg.vector_norm.html
 axm vector_norm: [F: Floating]
     → {r nr: Nat, s: «r; Nat»}
@@ -1191,15 +1146,13 @@ axm vector_norm: [F: Floating]
     → (tensor.Tensor r s F#A#R#T)
     → ReductionTensor @(F#A#R#T, r, nr)
         (s, torch_canonical_dims @(r, nr) dimensions, keepdim);
-/// Full-tensor L2/Frobenius norm. A separate scalar schema keeps the dependent
-/// `norm2_dims` result useful for partial reductions without exposing an empty
-/// tensor shape to the native execution ABI.
+/// Full-tensor L2/Frobenius norm as a scalar, so the native ABI never sees an empty tensor shape.
 axm norm2_all: [F: Floating]
                        → {r: Nat, s: «r; Nat»}
                        → (tensor.Tensor r s F#A#R#T) → F#A#R#T;
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.sum.html
 /// Types: reduce every axis of `Tensor[A, s]` to its scalar physical representation.
-/// Scalar ABI companion for a full mixed-dtype sum reduction.
+/// Scalar result of a full mixed-dtype sum.
 axm sum_typed_all: [D: Reduction]
     → {r: Nat, s: «r; Nat»} → (tensor.Tensor r s D#Input) → D#Output;
 axm sum_all: [A: Arithmetic]
@@ -1215,17 +1168,15 @@ axm amax_all: [F: Floating]
 axm mean_all: [F: Floating]
                        → {r: Nat, s: «r; Nat»}
                        → (tensor.Tensor r s F#A#R#T) → F#A#R#T;
-/// Full `var_mean` reduction with scalar physical results. The Bool tag keeps
-/// the two equal scalar fields heterogeneous under MimIR normalization.
+/// Full `var_mean` with scalar results; the Bool tag stops normalization merging the two fields.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.var_mean.html
 axm var_mean_all: [F: Floating]
     → {r: Nat, s: «r; Nat»}
     → [correction: F#A#R#T]
     → (tensor.Tensor r s F#A#R#T)
     → [Bool, F#A#R#T, F#A#R#T];
-/// Reduction over logical singleton axes. Such axes are erased from MimIR's
-/// physical tensor type, but correction still determines whether variance is
-/// zero or NaN, so this operation is not an unconditional identity.
+/// Reduction over logical singleton axes (erased in MimIR's type); not an identity,
+/// since correction decides whether variance is zero or NaN.
 axm var_mean_singletons: [F: Floating]
     → {r: Nat, s: «r; Nat»}
     → [correction: F#A#R#T]
@@ -1256,7 +1207,7 @@ axm mean_dims_keepdim:
     → (tensor.Tensor r s F#A#R#T)
     → (tensor.Tensor r (torch_multi_keepdim_shape
          (s, torch_canonical_dims @(r, nr) dimensions)) F#A#R#T);
-/// PyTorch `mean.dim` with `keepdim` represented as a semantic parameter.
+/// PyTorch `mean.dim` with `keepdim`.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.mean.html
 axm mean: [F: Floating]
     → {r nr: Nat, s: «r; Nat»}
@@ -1264,7 +1215,7 @@ axm mean: [F: Floating]
     → (tensor.Tensor r s F#A#R#T)
     → ReductionTensor @(F#A#R#T, r, nr)
         (s, torch_canonical_dims @(r, nr) dimensions, keepdim);
-/// PyTorch `amax` with a generic axis tuple and `keepdim` parameter.
+/// PyTorch `amax` over an axis tuple with `keepdim`.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.amax.html
 axm amax: [F: Floating]
     → {r nr: Nat, s: «r; Nat»}
@@ -1273,8 +1224,7 @@ axm amax: [F: Floating]
     → ReductionTensor @(F#A#R#T, r, nr)
         (s, torch_canonical_dims @(r, nr) dimensions, keepdim);
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.var_mean.html
-/// Types: floating tensor and unique signed reduction axes to variance and
-/// mean tensors with those axes removed.
+/// Types: floating tensor and unique signed axes to variance and mean without those axes.
 axm var_mean_dims:
     [F: Floating]
     → {r nr: Nat, s: «r; Nat»}
@@ -1284,7 +1234,7 @@ axm var_mean_dims:
         (s, torch_canonical_dims @(r, nr) dimensions);
       [Bool, tensor.Tensor (torch_reduced_rank (torch_canonical_dims @(r, nr) dimensions)) s_out F#A#R#T,
              tensor.Tensor (torch_reduced_rank (torch_canonical_dims @(r, nr) dimensions)) s_out F#A#R#T];
-/// PyTorch `var_mean.dim` with the complete correction and keepdim surface.
+/// PyTorch `var_mean.dim` with `correction` and `keepdim`.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.var_mean.html
 axm var_mean: [F: Floating]
     → {r nr: Nat, s: «r; Nat»}
@@ -1323,7 +1273,7 @@ axm logsumexp_dims_keepdim: [F: Floating]
     → (tensor.Tensor r s F#A#R#T)
     → (tensor.Tensor r (torch_multi_keepdim_shape
          (s, torch_canonical_dims @(r, nr) dimensions)) F#A#R#T);
-/// PyTorch `logsumexp` with its `keepdim` parameter preserved in one schema.
+/// PyTorch `logsumexp` with `keepdim`.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.logsumexp.html
 axm logsumexp: [F: Floating]
     → {r nr: Nat, s: «r; Nat»}
@@ -1346,18 +1296,14 @@ axm bmm: [A: Arithmetic]
                   → {b m k n: Nat}
                   → [lhs: (tensor.Tensor 3 (b, m, k) A#R#T), rhs: (tensor.Tensor 3 (b, k, n) A#R#T)]
                   → (tensor.Tensor 3 (b, m, n) A#R#T);
-/// API-level `aten.matmul`. Vector promotion, batch broadcasting and result
-/// squeezing follow `torch/_decomp/decompositions.py::matmul`; static ranks
-/// and shapes let PE erase every unselected structural path.
+/// `aten.matmul` following `_decomp/decompositions.py::matmul`; PE erases unselected rank paths.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.matmul.html
 axm matmul: [A: Arithmetic]
                      → {rl rr: Nat, sl: «rl; Nat», sr: «rr; Nat»}
                      → [lhs: (tensor.Tensor rl sl A#R#T), rhs: (tensor.Tensor rr sr A#R#T)]
                      → (tensor.Tensor (torch_matmul_output_rank (rl, rr)) (torch_matmul_output_shape (sl, sr)) A#R#T);
 
-/// PyTorch `addmm` including scalar alpha/beta and arbitrary broadcasting of
-/// `self` into the matrix result. `self_dims` is the in-dimension broadcast
-/// map; it represents scalar, vector, and matrix `self` uniformly.
+/// PyTorch `addmm` with alpha/beta; `self_dims` broadcasts scalar, vector or matrix `self`.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.addmm.html
 /// Types: broadcastable `self`, `[m, k]`, `[k, n]`, and same-dtype scalars to `[m, n]`.
 axm addmm: [A: Arithmetic]
@@ -1367,9 +1313,7 @@ axm addmm: [A: Arithmetic]
                     → [beta: A#R#T, alpha: A#R#T]
                     → (tensor.Tensor 2 (m, n) A#R#T);
 
-/// PyTorch linear over an arbitrary batch prefix. The contraction is expressed
-/// with the tensor dialect's scalar-initialized `map_reduce`; optional bias is
-/// then broadcast over the batch prefix and added pointwise.
+/// PyTorch linear over any batch prefix; optional bias is broadcast and added.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.nn.functional.linear.html
 /// Types: `batch_shape + [k]`, weight `[n, k]`, optional bias `[n]` to `batch_shape + [n]`.
 axm linear: [A: Arithmetic]
@@ -1443,7 +1387,7 @@ axm max_pool1d:
 
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.nn.functional.avg_pool2d.html
 /// Types: NCHW floating input plus 2-D window parameters to the dependent pooled shape.
-/// Divisor semantics mirror `aten/src/ATen/native/cpu/AvgPoolKernel.cpp`.
+/// Divisor matches `ATen/native/cpu/AvgPoolKernel.cpp`.
 axm avg_pool2d:
     [F: Floating]
     → {n c h w: Nat}
@@ -1880,11 +1824,8 @@ anx lam adaptive_avg_pool3d (F: Floating)
 end
 
 pub mod normalization
-/// PyTorch source: `torch/_refs/__init__.py::native_layer_norm` and `_normalize`.
-/// PyTorch `native_layer_norm` over an arbitrary non-empty normalized suffix.
-/// The dependent input type captures the suffix and affine parameter shape
-/// invariants. Flattening the batch and normalized portions turns every rank
-/// combination into the same 2-D reduction without losing those constraints.
+/// PyTorch `_refs::native_layer_norm`/`_normalize` over a non-empty normalized suffix.
+/// The type enforces suffix/affine shapes; impl flattens to one 2-D reduction.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.native_layer_norm.html
 /// Types: `batch + normalized`, optional affine tensors, and eps to output/mean/rstd.
 axm native_layer_norm:
@@ -1899,11 +1840,7 @@ axm native_layer_norm:
        (tensor.Tensor (rb + rn) (vec.cat (batch_shape, ‹i: rn; 1›)) F#A#R#T),
        (tensor.Tensor (rb + rn) (vec.cat (batch_shape, ‹i: rn; 1›)) F#A#R#T)];
 
-/// Group normalization uses the input statistics for each `(N, group)` and
-/// applies optional affine parameters over the original channel dimension.
-/// Python: `reshape([N,G,C/G,*spatial])`, normalize the trailing dimensions,
-/// reshape back, then apply channel-wise `weight` and `bias`.
-/// PyTorch source: `torch/_refs/__init__.py::native_group_norm`.
+/// Per-`(N, group)` statistics, optional per-channel affine. PyTorch `_refs::native_group_norm`.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.nn.functional.group_norm.html
 axm group_norm:
     [F: Floating]
@@ -1914,9 +1851,7 @@ axm group_norm:
        groups: Nat, eps: F#A#R#T]
     → (tensor.Tensor r s F#A#R#T);
 
-/// Inference batch normalization for arbitrary rank >= 2. Running statistics
-/// are required in inference mode; affine weight and bias remain independent
-/// Optional parameters and specialize away when absent.
+/// Inference batch norm, rank >= 2, running stats required; absent affine Options specialize away.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.nn.functional.batch_norm.html
 /// Types: rank >= 2 floating tensor and channel vectors to a shape-preserving tensor.
 axm batch_norm_inference:
@@ -1930,13 +1865,10 @@ axm batch_norm_inference:
        eps: F#A#R#T]
     → (tensor.Tensor r s F#A#R#T);
 
-/// Pure training-result semantics of `aten.native_batch_norm`. The returned
-/// tuple is `(output, save_mean, save_invstd)`. ATen's optional running-stat
-/// mutation is intentionally outside this pure operator and must be made
-/// explicit by functionalization before calling it.
+/// Pure `aten.native_batch_norm` returning `(output, save_mean, save_invstd)`.
+/// Running-stat mutation is not modelled; functionalize it first.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.native_batch_norm.html
-/// Types: rank >= 2 floating input and optional channel vectors to an output
-/// tensor plus two channel-sized saved-statistic tensors.
+/// Types: rank >= 2 input, optional channel vectors to output plus two `[C]` saved stats.
 axm native_batch_norm: [F: Floating]
     → {r: Nat, s: «r; Nat»}
     → [input: (tensor.Tensor r s F#A#R#T),
@@ -1946,10 +1878,8 @@ axm native_batch_norm: [F: Floating]
     → [(tensor.Tensor r s F#A#R#T),
        (tensor.Tensor 1 (s#(torch_channel_dim @r)) F#A#R#T),
        (tensor.Tensor 1 (s#(torch_channel_dim @r)) F#A#R#T)];
-/// Functionalization boundary for training BatchNorm. In addition to native
-/// saved statistics, return updated running statistics instead of mutating the
-/// two input buffers.
-/// PyTorch schema: `aten._native_batch_norm_legit_functional`.
+/// Training BatchNorm that returns updated running stats instead of mutating them.
+/// PyTorch `aten._native_batch_norm_legit_functional`.
 axm native_batch_norm_functional: [F: Floating]
     → {r: Nat, s: «r; Nat»}
     → [input: (tensor.Tensor r s F#A#R#T),
@@ -1962,11 +1892,8 @@ axm native_batch_norm_functional: [F: Floating]
        (tensor.Tensor 1 (s#(torch_channel_dim @r)) F#A#R#T),
        (tensor.Tensor 1 (s#(torch_channel_dim @r)) F#A#R#T),
        (tensor.Tensor 1 (s#(torch_channel_dim @r)) F#A#R#T)];
-/// Pure forward semantics of `aten.batch_norm`. Static `training` selects and
-/// eliminates either batch-statistics reduction or running-statistics use.
-/// `momentum` is retained in the API for direct mapping, but running-stat
-/// mutation belongs to functionalization and is not part of this output-only
-/// operator.
+/// Pure forward `aten.batch_norm`; static `training` picks batch or running stats.
+/// `momentum` is schema-only (running-stat mutation belongs to functionalization).
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.nn.functional.batch_norm.html
 axm batch_norm: [F: Floating]
     → {r: Nat, s: «r; Nat»}
@@ -1992,8 +1919,7 @@ axm log_softmax: [F: Floating]
                           → (tensor.Tensor r s F#A#R#T);
 
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.native_group_norm.html
-/// Types: NCHW-like input and optional channel affine tensors to output plus
-/// per-(batch, group) mean and reciprocal standard deviation.
+/// Types: NC* input, optional channel affine to output plus per-(N, group) mean and rstd.
 axm native_group_norm:
     [F: Floating]
     → {r: Nat, s: «r; Nat»}
@@ -2008,8 +1934,7 @@ axm native_group_norm:
 end
 
 pub mod loss
-/// Mean-reduced SmoothL1/Huber loss over equal-shape floating tensors.
-/// PyTorch source: `torch/_decomp/decompositions.py::smooth_l1_loss`.
+/// Mean SmoothL1/Huber loss over equal shapes. PyTorch `_decomp::smooth_l1_loss`.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.nn.functional.smooth_l1_loss.html
 axm smooth_l1_mean: [F: Floating]
                          → {r: Nat, s: «r; Nat»}
@@ -2023,12 +1948,8 @@ axm smooth_l1_loss: [F: Floating]
     → [input: (tensor.Tensor ri si F#A#R#T), target: (tensor.Tensor rt st F#A#R#T)]
     → [reduce_mode: Nat, beta: F#A#R#T]
     → ((tensor.Tensor ro so F#A#R#T), F#A#R#T)#(reduce_mode != 0);
-/// Reduced KL divergence over equal-shape floating tensors.
-/// Reduction tags are `0=sum`, `1=mean`, and `2=batchmean`; they are API-level
-/// static choices so PE removes the unused denominator and result branch.
-/// This reduced schema requires rank >= 1. A future `none` schema can preserve
-/// the input shape without introducing a dependent reduced/non-reduced result.
-/// PyTorch source: `torch/nn/functional.py::kl_div` and `aten::kl_div`.
+/// Reduced KL divergence (rank >= 1); static tags `0=sum`, `1=mean`, `2=batchmean`.
+/// PyTorch `nn/functional.py::kl_div` and `aten::kl_div`.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.nn.functional.kl_div.html
 axm kl_div_reduced: [F: Floating]
                          → {r: Nat, s: «r; Nat»}
@@ -2040,16 +1961,8 @@ axm kl_div: [F: Floating]
     → [input target: (tensor.Tensor r s F#A#R#T)]
     → [reduce_mode: Nat, log_target: Bool]
     → ((tensor.Tensor r s F#A#R#T), F#A#R#T)#(reduce_mode != 0);
-/// Rank-2 TripletMarginLoss with the public PyTorch parameters retained as
-/// PE-visible values. Reduction tags are `0=sum` and `1=mean`.
-/// Python:
-/// ```python
-/// d_pos = pairwise_distance(anchor, positive, p, eps)
-/// d_neg = pairwise_distance(anchor, negative, p, eps)
-/// if swap: d_neg = minimum(d_neg, pairwise_distance(positive, negative, p, eps))
-/// return reduce(maximum(d_pos - d_neg + margin, 0))
-/// ```
-/// PyTorch source: `torch/nn/functional.py::triplet_margin_loss`.
+/// Rank-2 TripletMarginLoss; reduction tags `0=sum`, `1=mean`. PyTorch `triplet_margin_loss`.
+/// Python: `reduce(max(d(a, p) - d_neg + margin, 0))`, `d_neg = d(a, n)`, min'd with `d(p, n)` if `swap`.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.nn.functional.triplet_margin_loss.html
 axm triplet_margin_reduced: [F: Floating]
     → {n d: Nat}
@@ -2063,25 +1976,14 @@ axm triplet_margin_loss: [F: Floating]
     → let feature_dim = core.idx 0 r  (r - 1);
       let loss_shape = torch_reduce_shape (s, feature_dim);
       ((tensor.Tensor (r - 1) loss_shape F#A#R#T), F#A#R#T)#(reduce_mode != 0);
-/// Scalar physical boundary for rank-1 `reduction="none"`. PyTorch exposes a
-/// 0-d tensor, while native MimIR execution represents that single value as a
-/// scalar rather than bufferizing `Tensor[()]`.
+/// Rank-1 `reduction="none"`: PyTorch's 0-d result is returned as a scalar, not `Tensor[()]`.
 axm triplet_margin_loss_1d_none: [F: Floating]
     → {d: Nat}
     → [anchor positive negative: (tensor.Tensor 1 d F#A#R#T)]
     → [margin p eps: F#A#R#T, swap: Bool]
     → F#A#R#T;
-/// Mean-reduced cross entropy for the common `(N, C)` logits and `(N)` I64
-/// class-target schema.
-/// Python:
-/// ```python
-/// log_probs = torch.log_softmax(input, dim=1)
-/// losses = -torch.gather(log_probs, 1, target[:, None]).reshape(N)
-/// return losses.mean()
-/// ```
-/// The checked gather owns target bounds diagnostics. Stable log-softmax and
-/// the reduction remain composable Torch operators and are recursively
-/// decomposed by `lower_torch`.
+/// Mean cross entropy for `(N, C)` logits and `(N)` I64 targets; the checked gather bounds targets.
+/// Python: `-gather(log_softmax(input, 1), 1, target[:, None]).mean()`.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.nn.functional.cross_entropy.html
 /// Types: `(N, C)` floating logits and `(N)` I64 class indices to a scalar.
 axm cross_entropy_mean_2d: [F: Floating]
@@ -2089,9 +1991,8 @@ axm cross_entropy_mean_2d: [F: Floating]
     → [input: (tensor.Tensor 2 (n, c) F#A#R#T), target: (tensor.Tensor 1 n I64)]
     → F#A#R#T;
 
-/// One public CrossEntropyLoss schema for both class-index and probability
-/// targets. The union is a lightweight target-domain interface: injection
-/// proves the target's element/shape relationship, and PE removes this match.
+/// CrossEntropyLoss for class-index or probability targets; the injection fixes the target
+/// shape and PE removes the match.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.nn.functional.cross_entropy.html
 axm cross_entropy: [F: Floating]
     → {r: Nat, s: «r; Nat»}
@@ -2105,9 +2006,7 @@ axm cross_entropy: [F: Floating]
       ((tensor.Tensor (r - 1) loss_shape F#A#R#T), F#A#R#T)#(reduce_mode != 0);
 end
 
-/// Typed target-domain constructors for the unified CrossEntropy schema.
-/// Their injections are compile-time values, so the implementation match is
-/// eliminated before tensor lowering.
+/// Target-domain constructors for CrossEntropy; compile-time injections, matched away by PE.
 anx lam cross_entropy_index_target (F: Floating)
     {r: Nat, s: «r; Nat»}
     (target: (tensor.Tensor (r - 1) (torch_reduce_shape
@@ -2190,9 +2089,8 @@ anx lam addmm (A: Arithmetic)
                 (torch_scale_scalar A alpha) @(2, (m, n)) product;
             (core.select (A#is_zero beta, without_self, with_self)) ()
             where
-                // PyTorch deliberately ignores `self` when beta is zero. Keeping
-                // this as a thunk prevents NaNs in `self` from entering the graph,
-                // and lets PE delete the broadcast and multiply completely.
+                // PyTorch ignores `self` when beta is zero; the thunk keeps NaNs in `self`
+                // out and lets PE delete the broadcast and multiply.
                 lam without_self(): (tensor.Tensor 2 (m, n) A#R#T) = scaled_product;
                 lam with_self(): (tensor.Tensor 2 (m, n) A#R#T) =
                     let broadcast_self = tensor.broadcast_in_dim @(A#R#T, ri, 2)
@@ -2239,9 +2137,7 @@ anx lam tril {T: *, r: Nat, s: «r; Nat»}
 
 end
 pub mod metadata
-/// Runtime-visible size component of `aten._assert_tensor_metadata`.
-/// Dtype, device, layout, and stride are checked by the frontend while those
-/// properties are compile-time-only in the current tensor representation.
+/// Size check of `aten._assert_tensor_metadata`; dtype/device/layout/stride are frontend-checked.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.Tensor.html
 /// Types: two rank-`r` Nat shape vectors to Bool; mismatch follows `runtime.require`.
 axm assert_tensor_metadata: {r: Nat}
@@ -2260,12 +2156,11 @@ anx lam assert_tensor_metadata {r: Nat}
     end;
 
 end
-/// Selectively exposes Torch reference semantics. Pass preserved operator names
-/// with `-X torch:preserve=native_layer_norm_op,convolution_op` so a later
-/// target-specific phase can consume them before the exhaustive fallback.
+/// Lowers Torch ops except those in `-X torch:preserve=native_layer_norm_op,...`,
+/// left for a later target-specific phase.
 axm decompose_torch: compile.Phase;
 
-/// Exhaustively exposes all Torch reference semantics.
+/// Lowers all Torch ops.
 axm lower_torch: compile.Phase;
 
 pub mod conv
@@ -2281,11 +2176,8 @@ axm general:
        bias: option.Opt@(tensor.Tensor 1 cout A#R#T)]
     → (tensor.Tensor 4 (tensor.conv_shape (n, cout, (h, w), (kh, kw), stride, dilation, padding)) A#R#T);
 
-/// Rank-3 NCL `aten.convolution`/`conv1d` specialization. PyTorch represents
-/// stride, padding, dilation, and output_padding as singleton lists; this
-/// interface uses their sole values because literal-one arrays collapse in
-/// MimIR's nested-array representation. The implementation embeds NCL/OIL as
-/// NCL1/OIL1 and reuses the canonical grouped 2-D cross-correlation semantics.
+/// Rank-3 NCL `aten.convolution`/`conv1d`, embedded as NCL1/OIL1 into the 2-D form.
+/// Singleton stride/padding/... lists are scalars, since one-element arrays collapse in MimIR.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.nn.functional.conv1d.html
 /// Types: NCL input, OIL weight, optional output-channel bias, to NCL output.
 axm conv1d:
@@ -2299,8 +2191,7 @@ axm conv1d:
     → (tensor.Tensor 3 (torch_conv1d_shape
             (n, cout, length, kernel, stride, dilation, padding)) A#R#T);
 
-/// Rank-5 NCDHW `aten.convolution` specialization. PyTorch exposes OIDHW
-/// weights for ordinary Conv3d; groups partition both channel dimensions.
+/// Rank-5 NCDHW `aten.convolution` with OIDHW weights; groups split both channel dims.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.nn.functional.conv3d.html
 /// Types: NCDHW input, OIDHW weight, optional output-channel bias, to NCDHW output.
 axm conv3d:
@@ -2328,8 +2219,7 @@ axm transpose2d:
     → (tensor.Tensor 4 (conv_transpose2d_shape (n, cout, (h, w), (kh, kw),
           stride, dilation, padding, output_padding)) A#R#T);
 
-/// Rank-3 NCL transposed convolution. The implementation embeds the trailing
-/// spatial axis into NCL1 and reuses the canonical 2-D semantics.
+/// Rank-3 NCL transposed convolution, embedded as NCL1 into the 2-D form.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.nn.functional.conv_transpose1d.html
 /// Types: NCL input, IOK weight, optional output-channel bias, to NCL output.
 axm transpose1d:
@@ -2343,8 +2233,7 @@ axm transpose1d:
           (n, cout, length, kernel, stride, dilation, padding, output_padding)) A#R#T);
 
 /// Rank-5 NCDHW transposed convolution with PyTorch IO(DHW) weights.
-/// Unit-stride axes are removed by partial evaluation; strided axes lower
-/// through tensor reshape/pad/reshape/slice zero insertion.
+/// Unit strides vanish under PE; strided axes insert zeros via reshape/pad/slice.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.nn.functional.conv_transpose3d.html
 /// Types: NCDHW input, IO(DHW) weight, optional output-channel bias, to NCDHW output.
 axm transpose3d:
@@ -3077,8 +2966,7 @@ anx lam var_mean_all (F: Floating)
         (F#A#R#_0, ‹i: n; torch_nonfinite_count_scalar F (values#i)›);
     let mean = torch_var_mean_adjust_mean F
         (arithmetic_mean, nonfinite_count);
-    // Full reductions are statically specialized by the frontend, so PE
-    // unrolls this scalar fold without creating a rank-zero tensor buffer.
+    // Statically specialized: PE unrolls this fold without a rank-zero buffer.
     let squared_centered = ‹i: n;
         let delta = F#A#sub (values#i, mean);
         F#A#R#mul (delta, delta)›;
@@ -3265,8 +3153,7 @@ anx lam var_mean_dims
                 (torch_var_mean_adjust_mean F)
                 @(torch_reduced_rank dims, s_out)
                 (arithmetic_mean, nonfinite_count);
-            // Two-pass centered variance avoids the cancellation in
-            // E[x^2] - E[x]^2 for large-offset inputs.
+            // Two-pass centered variance avoids cancellation in E[x^2] - E[x]^2.
             let mean_b = tensor.broadcast_in_dim
                 @(F#A#R#T, torch_reduced_rank dims, r)
                 (s_out, s, mean, torch_kept_axes dims);
@@ -3278,15 +3165,13 @@ anx lam var_mean_dims
                 (torch_square_scalar F#A) @(r, s) centered;
             let centered_sum_sq = torch_multi_reduce
                 (F#A#R#add, F#A#R#_0) (s, dims) squared_centered;
-            // PyTorch clamps non-positive degrees of freedom to zero. IEEE
-            // division then produces NaN or Inf instead of a runtime error.
+            // PyTorch clamps dof to zero; division then yields NaN/Inf, not an error.
             let denominator = F#A#maximum (
                 F#A#sub (count, correction), F#A#R#_0);
             let variance = tensor.unary @(F#A#R#T, F#A#R#T)
                 (torch_div_scalar F#A denominator)
                 @(torch_reduced_rank dims, s_out) centered_sum_sq;
-            // The heterogeneous tag prevents `[variance, mean]` from
-            // normalizing into one rank-higher tensor when shapes coincide.
+            // Tag stops `[variance, mean]` normalizing into one higher-rank tensor.
             (ff, variance, mean);
     end;
 
@@ -3396,9 +3281,7 @@ anx lam logsumexp (F: Floating)
     end;
 
 end
-/// Selects training batch statistics or inference running statistics. The
-/// continuation-style branch keeps the unused path out of the normalized IR
-/// whenever `training` is static.
+/// Batch or running statistics; the CPS branch drops the unused path when `training` is static.
 lam torch_batch_norm_stats (F: Floating)
     {r: Nat, s: «r; Nat»}
     (input: (tensor.Tensor r s F#A#R#T),
@@ -3416,9 +3299,7 @@ lam torch_batch_norm_stats (F: Floating)
              (tensor.Tensor 1 (s#(torch_channel_dim @r)) F#A#R#T)] =
             let channel_dim = torch_channel_dim @r;
             let channels = s#channel_dim;
-            // Move C last and flatten all sample axes. Reducing axis zero then
-            // has the manifest result shape `[C]`, avoiding a proof that a
-            // symbolic multi-axis reduction leaves exactly the channel axis.
+            // Move C last and flatten samples so reducing axis 0 manifestly yields `[C]`.
             let permutation = ‹d: r;
                 core.idx 0 r  ((torch_reduce_subscripts @r channel_dim)#d)›;
             let transposed_shape = torch_transpose_shape (s, permutation);
@@ -3496,8 +3377,7 @@ anx lam native_layer_norm
             let normalized = tensor.binary
                 @(F#A#R#T, F#A#R#T, F#A#R#T)
                 F#A#R#mul @(2, flat_shape) (centered, rstd_b);
-            // Keep tensor-valued Options out of branch functions. The option
-            // normalizer resolves known Some/None values before tensor lowering.
+            // No tensor-valued Options in branches; the option normalizer resolves them.
             let default_weight = tensor.splat @(F#A#R#T, rn)
                 (normalized_shape, F#from_nat 1);
             let effective_weight = option.unwrap_or weight default_weight;
@@ -3609,8 +3489,7 @@ anx lam batch_norm_inference
             let normalized = tensor.binary
                 @(F#A#R#T, F#A#R#T, F#A#R#T)
                 F#A#R#mul @(r, s) (centered, rstd_b);
-            // Avoid tensor-typed branch functions: the option variant is a
-            // compile-time API choice, while its tensor payload stays dynamic.
+            // No tensor-typed branches: the variant is static, the payload dynamic.
             let effective_weight = option.unwrap_or
                 weight (tensor.splat @(F#A#R#T, 1) (channels, F#from_nat 1));
             let effective_bias = option.unwrap_or
@@ -3869,8 +3748,7 @@ anx lam native_group_norm
     end;
 
 end
-/// Integer-target CrossEntropy components. The second result is the weighted
-/// denominator used by PyTorch's mean reduction.
+/// Class-index CrossEntropy losses plus the weighted denominator for mean reduction.
 lam torch_cross_entropy_index_components (F: Floating)
     {r: Nat, s: «r; Nat»}
     (input: (tensor.Tensor r s F#A#R#T),
@@ -3899,8 +3777,7 @@ lam torch_cross_entropy_index_components (F: Floating)
     let safe_target = tensor.unary @(I64, I64)
         (torch_cross_entropy_safe_target ignore_index)
         @(1, (examples,)) flat_target;
-    // Validate class indices once, then share the bounded tensor between the
-    // logits and optional class-weight gathers.
+    // Check indices once; share them between the logits and class-weight gathers.
     let checked_target = torch_checked_index_cast
         @(classes, 1, (examples,))
         "cross_entropy target out of range" safe_target;
@@ -3913,8 +3790,7 @@ lam torch_cross_entropy_index_components (F: Floating)
         (examples, 1) (examples,) selected_2d;
     let effective_weight = option.unwrap_or
         weight (tensor.splat @(F#A#R#T, 1) (classes, F#from_nat 1));
-    // Preserve the option match until PE: the common unweighted case does
-    // not materialize or index a class-weight tensor.
+    // Match kept until PE so the unweighted case never builds a weight tensor.
     let selected_weight = match weight with
         | Some actual_weight =>
             tensor.gather @(F#A#R#T, 1)
@@ -3962,8 +3838,7 @@ lam torch_cross_entropy_index_components (F: Floating)
         @(1, (examples,)) denominator_values;
     (ff, loss, denominator);
 
-/// Probability-target CrossEntropy components. PyTorch's mean denominator is
-/// the number of unreduced output elements, independent of class weights.
+/// Probability-target CrossEntropy; the mean denominator ignores class weights.
 lam torch_cross_entropy_probability_components (F: Floating)
     {r: Nat, s: «r; Nat»}
     (input target: (tensor.Tensor r s F#A#R#T),
@@ -3996,14 +3871,12 @@ lam torch_cross_entropy_probability_components (F: Floating)
         (torch_neg_scalar F#A) @(r, s) weighted_logs;
     let loss = torch_reduce_dim
         (F#A#R#add, F#A#R#_0) (s, class_dim) weighted_terms;
-    // PyTorch defines mean over C=0 probability targets as NaN. Selecting a
-    // zero denominator preserves that result while none/sum remain zero.
+    // Mean over C=0 is NaN in PyTorch (zero denominator); none/sum stay zero.
     let denominator_count = core.select @Nat (
         classes == 0, 0, torch_numel loss_shape);
     (ff, loss, F#from_nat denominator_count);
 
-/// Internal class-index CrossEntropy implementation selected by the public
-/// target-domain match.
+/// Class-index CrossEntropy, selected by the target-domain match.
 lam torch_cross_entropy_index (F: Floating)
     {r: Nat, s: «r; Nat»}
     (input: (tensor.Tensor r s F#A#R#T),
@@ -4034,7 +3907,7 @@ lam torch_cross_entropy_index (F: Floating)
         (reduce_mode == 2, total, mean);
     torch_apply_loss_reduction (loss, reduced, reduce_mode);
 
-/// Internal probability-target implementation selected by the same match.
+/// Probability-target CrossEntropy, selected by the same match.
 lam torch_cross_entropy_probability (F: Floating)
     {r: Nat, s: «r; Nat»}
     (input target: (tensor.Tensor r s F#A#R#T),
@@ -4273,10 +4146,8 @@ axm cumsum_2d_direction: [F: Floating]
                                    → [dimension: I64, reverse: Bool]
                                    → (tensor.Tensor 2 (m, n) F#A#R#T)
                                    → (tensor.Tensor 2 (m, n) F#A#R#T);
-/// PyTorch composition: `cat((zeros_like(select(x, dim, 0)).unsqueeze(dim),
+/// Exclusive cumsum. Python: `cat((zeros_like(select(x, dim, 0)).unsqueeze(dim),
 /// cumsum(narrow(x, dim, 0, size(dim) - 1), dim)), dim)`.
-/// Static dimension and extent expose the full prefix and one-element shift to
-/// PE; only tensor pad/map operations remain.
 axm cumsum_exclusive_2d: [F: Floating]
                                    → {m n: Nat}
                                    → [dimension: I64]
@@ -4613,12 +4484,10 @@ anx lam flip {T: *, r nr: Nat, s: «r; Nat»}
 end
 
 pub mod recurrent
-/// One direction of `torch.nn.RNN`. The leading sequence axis is scanned with a loop-carried hidden
-/// tensor; `relu` selects the ReLU nonlinearity over the standard tanh, and `reverse` runs the sequence
-/// backwards while still returning the output in the original time order.
+/// One direction of `torch.nn.RNN`, scanning the sequence axis; `relu` replaces tanh,
+/// `reverse` scans backwards but returns output in original time order.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.nn.RNN.html
-/// Types: `[seq, batch, input]`, `[batch, hidden]`, input/recurrent weights and optional biases to
-/// `[output, final_hidden]`.
+/// Types: `[seq, batch, input]`, `[batch, hidden]`, weights, optional biases to `[output, final_hidden]`.
 axm rnn_direction: [F: Floating]
                  → {seq batch input_size hidden: Nat}
                  → [relu reverse: Bool]
@@ -4630,8 +4499,7 @@ axm rnn_direction: [F: Floating]
                     bias_hh: option.Opt@(tensor.Tensor 1 hidden F#A#R#T)]
                  → [(tensor.Tensor 3 (seq, batch, hidden) F#A#R#T), (tensor.Tensor 2 (batch, hidden) F#A#R#T)];
 
-/// One direction of `torch.nn.GRU`, in PyTorch's `(reset, update, new)` gate order and with its
-/// reset-after recurrent-bias semantics.
+/// One direction of `torch.nn.GRU`: `(reset, update, new)` gates, reset-after recurrent bias.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.nn.GRU.html
 /// Types: weights and biases have leading extent `3 * hidden`.
 axm gru_direction: [F: Floating]
@@ -4645,8 +4513,7 @@ axm gru_direction: [F: Floating]
                     bias_hh: option.Opt@(tensor.Tensor 1 (3 * hidden) F#A#R#T)]
                  → [(tensor.Tensor 3 (seq, batch, hidden) F#A#R#T), (tensor.Tensor 2 (batch, hidden) F#A#R#T)];
 
-/// One direction of `torch.nn.LSTM`, in PyTorch's `(input, forget, cell, output)` gate order.
-/// The scan state carries both the hidden and the cell tensor.
+/// One direction of `torch.nn.LSTM`: `(input, forget, cell, output)` gates, state `(h, c)`.
 /// PyTorch API: https://pytorch.org/docs/stable/generated/torch.nn.LSTM.html
 /// Types: weights and biases have leading extent `4 * hidden`.
 axm lstm_direction: [F: Floating]
@@ -4737,8 +4604,7 @@ con torch_gru_step (F: Floating) {batch input_size hidden: Nat}
     let next = torch_recurrent_binary F#A @(batch, hidden) F#A#R#add (candidate, weighted_delta);
     return (next, next);
 
-/// The leading `Bool` is a private tag keeping the two rank-2 state tensors from normalizing into one
-/// rank-3 tensor; it stays `ff` and so carries no state of its own.
+/// Leading `Bool` (always `ff`) stops the two rank-2 states normalizing into one rank-3 tensor.
 con torch_lstm_step (F: Floating) {batch input_size hidden: Nat}
                     (weight_ih: (tensor.Tensor 2 (4 * hidden, input_size) F#A#R#T),
                      weight_hh: (tensor.Tensor 2 (4 * hidden, hidden) F#A#R#T),
